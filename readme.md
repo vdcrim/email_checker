@@ -21,19 +21,19 @@ settings can be specified from command line.
 
 ###Comand line options
 
-  usage: email checker [-h] [-V] [-v] [-s SETTINGS] [-p PROFILE] [-u USER]
-                       [-x PASS]
-  optional arguments:
-    -h, --help            show this help message and exit
-    -V, --version         show program's version number and exit
-    -v, --verbose         show detailed info
-    -s SETTINGS, --settings SETTINGS
-                          specify a custom settings file path
-    -p PROFILE, --profile PROFILE
-                          choose a profile from the settings file
-    -u USER, --user USER  specify the user
-    -x PASS, --pass PASS  specify the password
+    usage: email checker [-h] [-V] [-v] [-s SETTINGS] [-p PROFILE] [-u USER]
+                         [-x PASS]
+    optional arguments:
+      -h, --help            show this help message and exit
+      -V, --version         show program's version number and exit
+      -v, --verbose         show detailed info
+      -s SETTINGS, --settings SETTINGS
+                            specify a custom settings file path
+      -p PROFILE, --profile PROFILE
+                            choose a profile from the settings file
+      -u USER, --user USER  specify the user
+      -x PASS, --pass PASS  specify the password
 
 ###Changelog:
 
-  0.1 [2013-11-10]: initial release
+    0.1 [2013-11-10]: initial release
