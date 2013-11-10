@@ -5,7 +5,7 @@ Requirements:
 - IMAP access
 - Python 3.3+ <http://www.python.org/> (if not using a build)
 - gntp Python library <http://pythonhosted.org/gntp/> (if not using a build)
-- a running notification application supporting the GTNP protocol, e.g. Growl
+- a running notification application supporting the GNTP protocol, e.g. Growl
   and its ports
 
 Just a very simple script, without any interaction with the user. To end it, 
