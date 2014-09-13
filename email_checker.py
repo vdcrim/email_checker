@@ -295,6 +295,8 @@ class EmailChecker(object):
                                            self._do_check)
             self._thread.daemon = True
             self._thread.start()
+        else:
+            self._cancel.set()
     
     def _parse_list_response(self, line):
         flags, delimiter, mailbox_name = \
