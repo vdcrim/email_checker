@@ -237,7 +237,7 @@ class EmailChecker(object):
                         continue_ = True
                         break
             else: continue_ = False
-            if continue_ or mailbox.strip(b'"').decode('utf-7') in \
+            if continue_ or decode_imap_utf7(mailbox.strip(b'"')) in \
                     self.config.excluded_mailboxes_names:
                 continue
             try:
@@ -258,7 +258,7 @@ class EmailChecker(object):
                 search_criteria = '(UNSEEN)'
             ok, data = self.mail.uid('SEARCH', None, search_criteria)
             if verbose:
-                print(mailbox.strip(b'"').decode('utf-7'), uidnext, data[0])
+                print(decode_imap_utf7(mailbox.strip(b'"')), uidnext, data[0])
             if not data[0]:
                 self.mail.close()
                 continue
@@ -327,6 +327,32 @@ class EmailChecker(object):
         self._thread.join(10)
         try: self.logout()
         except: pass
+
+
+def decode_imap_utf7(text):
+    """Decode a byte string according to RFC 3501, section 5.1.3"""
+    if isinstance(text, bytes):
+        text = text.decode('ascii')
+    decoded = []
+    imap_utf7_text = []
+    for chr in text:
+        if imap_utf7_text:
+            if chr == '-':
+                if len(imap_utf7_text) == 1:
+                    decoded.append('&')
+                else:
+                    imap_utf7_text = b'+' + ''.join(
+                        imap_utf7_text[1:]).encode('ascii').replace(b',', b'/')\
+                        + b'-'
+                    decoded.append(imap_utf7_text.decode('utf-7'))
+                imap_utf7_text = []
+            else:
+                imap_utf7_text.append(chr)
+        elif chr == '&':
+            imap_utf7_text.append(chr)
+        else:
+            decoded.append(chr)
+    return ''.join(decoded)
 
 
 if __name__ == '__main__':
