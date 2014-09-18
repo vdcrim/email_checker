@@ -19,7 +19,7 @@ You may need to read this if trying to build on (at least) Ubuntu 13.04:
 <https://bitbucket.org/anthony_tuininga/cx_freeze/issue/32/cant-compile-cx_freeze-in-ubuntu-1304>
 
 
-Copyright (C) 2013  Diego Fernández Gosende <dfgosende@gmail.com>
+Copyright (C) 2013, 2014  Diego Fernández Gosende <dfgosende@gmail.com>
 
 This program is free software: you can redistribute it and/or modify
 it under the terms of the GNU General Public License as published by
@@ -70,9 +70,10 @@ base_dir = os.path.join(temp_dir.name, email_checker.name)
 include_files=[['email_checker.py', 'src/email_checker.py'],
                ['setup.py', 'src/setup.py'],
                'settings.ini', 'copying.txt', 'icons/']
-build_options = dict(build_exe=base_dir, 
+build_options = dict(build_exe=base_dir, replace_paths=[('*', '')],
     packages = [], include_files=include_files, 
-    excludes = ['win32api', 'win32con', 'pywintypes', 'pyexpat'], 
+    excludes = ['win32api', 'win32con', 'pywintypes', 'pyexpat', 'pythoncom', 
+                'wmi'], 
     compressed=True, optimize=1, create_shared_zip=True, include_msvcr=True,
     )
 if os.path.isfile(icon):
@@ -134,4 +135,4 @@ with zipfile.ZipFile('{} v{} ({} {} executable).zip'.format(email_checker.name,
             zip.write(real_path, archive_path)
 print('\nZIP file created')
 
-input('\nPress a key to finish...')
+input('\nPress Return to finish...')

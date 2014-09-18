@@ -31,13 +31,18 @@ settings can be specified from command line:
     -x PASS, --pass PASS  specify the password
 
 Changelog:
-  0.1 [2013-11-10]: initial release
+  0.1 [2013-11-10]
+    initial release
+  0.2 [2014-09-19]:
+    improve exception handling / reconnection
+    fix not exiting after a single check
+    decode correctly mailbox names
 
 
 Homepage: <https://github.com/vdcrim/email_checker>
 
 
-Copyright (C) 2013  Diego Fernández Gosende <dfgosende@gmail.com>
+Copyright (C) 2013, 2014  Diego Fernández Gosende <dfgosende@gmail.com>
 
 This program is free software: you can redistribute it and/or modify
 it under the terms of the GNU General Public License as published by
@@ -62,14 +67,22 @@ import email.parser, email.header
 from datetime import datetime, timezone
 import time
 import threading
+import queue
 import configparser
 import argparse
 
 import gntp.notifier
+if os.name == 'nt':
+    try:
+        import pythoncom
+        import wmi
+    except:
+        wmi = None
+
 
 # Application info
 name = 'email checker'
-version = '0.1'
+version = '0.2'
 description = 'New messages notifier'
 url = 'https://github.com/vdcrim/email_checker'
 license = 'GNU GPL v3'
@@ -78,6 +91,8 @@ license = 'GNU GPL v3'
 
 
 class EmailChecker(object):
+    
+    pause, pause_internal, resume, resume_internal, exit, error = range(6)
     
     def __init__(self, config_path=None):
         self.config = configparser.ConfigParser(
@@ -88,9 +103,10 @@ class EmailChecker(object):
         self.uid_dict = defaultdict(int) # TODO: UIDVALIDITY
         self.re_list_response = re.compile(br'\((.*?)\)\s+"(.*?)"\s+(.*)')
         self.parse_header = email.parser.BytesHeaderParser().parsebytes
-        self._thread = None
+        self._check_thread = None
+        self._power_thread = None
         self._cancel = threading.Event()
-        self._err = None
+        self._cancel_all = threading.Event()
     
     def parse_command_line(self):
         epilog = 'Latest version: <{url}>\n\nLicense: {license}'.format(
@@ -146,7 +162,6 @@ class EmailChecker(object):
                 return icon_file.read()
         else:
             return self.profile['icon']
-        
     
     def notify(self, title, description):
         return self.growl_notifier.notify('New email', title, description, 
@@ -154,47 +169,9 @@ class EmailChecker(object):
                                           priority=1, 
                                           callback=self.profile['url'])
     
-    def login(self):
-        try:
-            self.mail = imaplib.IMAP4_SSL(self.profile['hostname'], 
-                                          int(self.profile['port']))
-        except OSError as err:
-            try:
-                period = self.profile.getboolean('period')
-            except ValueError:
-                period = True
-            if period:
-                if self.config['general'].getboolean('verbose'):
-                    print('\n' + str(err))
-                self._thread = threading.Timer(self.profile.getint('period'), 
-                                               self._do_check)
-                self._thread.daemon = True
-                self._thread.start()
-                return
-            else:
-                self._err = str(err)
-                self._cancel.set()
-                return
-        try:
-            ok, message = self.mail.login(self.profile['user_id'], 
-                                          self.profile['password'])
-        except imaplib.IMAP4.error as err:
-            self._err = err.args[0]
-            self._cancel.set()
-            return
-        if ok != 'OK':
-            self._err = message[0].decode()
-            self._cancel.set()
-            return
-        if self.config['general'].getboolean('verbose'):
-            print('\n' + message[0].decode())
-    
-    def logout(self):
-        bye, message = self.mail.logout()
-        if self.config['general'].getboolean('verbose'):
-            print('\n' + message[0].decode())
-    
-    def check(self, period=None):
+    def check(self, period=None, power=False):
+        self._cancel.clear()
+        self._cancel_all.clear()
         # update period
         if period == False:
             self.profile['period'] = 'no'
@@ -202,101 +179,137 @@ class EmailChecker(object):
             self.profile['period'] = str(period)
         if self.config['general'].getboolean('verbose'):
             print('\nperiod:', self.profile['period'])
+        # monitor power management for suspension
+        if power:
+            if os.name == 'nt' and wmi:
+                self._power_thread = threading.Thread(
+                                     target=self._power_thread_f, daemon=True)
+                self._power_thread.start()
+            else:
+                pass
         # start checking
-        self._thread = threading.Thread(target=self._do_check, daemon=True)
-        self._thread.start()
+        self._check_thread = threading.Thread(
+                                            target=self._do_check, daemon=True)
+        self._check_thread.start()
     
-    def _do_check(self):
+    def _do_check(self, retry=True):
         verbose = self.config['general'].getboolean('verbose')
         if verbose:
-            print('\nchecking...', datetime.now(timezone.utc).astimezone())
-        # get list of mailboxes
+            print('\n\nchecking...', datetime.now(timezone.utc).astimezone())
         try:
-            ok, mblist = self.mail.list()
-        except (imaplib.IMAP4.abort, ConnectionAbortedError) as err:
+            # log in
+            self.mail = imaplib.IMAP4_SSL(self.profile['hostname'], 
+                                          int(self.profile['port']))
+            ok, message = self.mail.login(self.profile['user_id'], 
+                                          self.profile['password'])
             if verbose:
-                print(err)
-            time.sleep(10)
-            self.login()
+                print('\n' + message[0].decode() + '\n')
             if self._cancel.is_set():
                 return
+            
+            # check every mailbox
+            if 'IDLE' in self.mail.capabilities:
+                pass # not supported in Outlook
             ok, mblist = self.mail.list()
-        except imaplib.IMAP4.error as err:
-            self._err = err.args[0]
-            self._cancel.set()
-            return
-        # check every mailbox
-        for mailbox in mblist:
-            if self._cancel.is_set():
-                return
-            # select mailbox, if it's not excluded
-            flags, delimiter, mailbox = self._parse_list_response(mailbox)
-            for flag in flags:
-                if flag in self.config.excluded_mailboxes_flags or \
-                   flag == r'\Noselect':
-                        continue_ = True
-                        break
-            else: continue_ = False
-            if continue_ or decode_imap_utf7(mailbox.strip(b'"')) in \
-                    self.config.excluded_mailboxes_names:
-                continue
-            try:
+            for mailbox in mblist:
+                if self._cancel.is_set():
+                    break
+                
+                # select mailbox, if it's not excluded
+                flags, delimiter, mailbox = self._parse_list_response(mailbox)
+                for flag in flags:
+                    if flag in self.config.excluded_mailboxes_flags or \
+                       flag == r'\Noselect':
+                            continue_ = True
+                            break
+                else: continue_ = False
+                if continue_ or decode_imap_utf7(mailbox.strip(b'"')) in \
+                        self.config.excluded_mailboxes_names:
+                    continue
                 ok, data = self.mail.select(mailbox, readonly=True)
-            except imaplib.IMAP4.abort as err:
-                self._thread = threading.Thread(target=self._do_check, 
-                                                daemon=True)
-                self._thread.start()
-                return
-            # search for new unread messages
-            # UIDNEXT is the starting UID for the next check
-            uidnext = self.uid_dict[mailbox]
-            ok, new_uidnext = self.mail.response('UIDNEXT')
-            self.uid_dict[mailbox] = int(new_uidnext[0])
-            if uidnext:
-                search_criteria = '(UNSEEN UID {}:*)'.format(uidnext)
-            else:
-                search_criteria = '(UNSEEN)'
-            ok, data = self.mail.uid('SEARCH', None, search_criteria)
-            if verbose:
-                print(decode_imap_utf7(mailbox.strip(b'"')), uidnext, data[0])
-            if not data[0]:
-                self.mail.close()
-                continue
-            if self._cancel.is_set():
-                self.mail.close()
-                return
-            # parse headers for 'From' and 'Subject' and 
-            # notify Growl about the new messages
-            uids = data[0].decode().split()
-            if int(uids[-1]) < uidnext: # because IMAP
-                self.mail.close()
-                continue
-            ok, data = self.mail.uid('FETCH', '{}:*'.format(uids[0]), 
-                                     '(BODY.PEEK[HEADER])')
-            if verbose: print('')
-            for header in data[::2]:
+                
+                # search for new unread messages
+                # UIDNEXT is the starting UID for the next check
+                uidnext = self.uid_dict[mailbox]
+                ok, new_uidnext = self.mail.response('UIDNEXT')
+                self.uid_dict[mailbox] = int(new_uidnext[0])
+                if uidnext:
+                    search_criteria = '(UNSEEN UID {}:*)'.format(uidnext)
+                else:
+                    search_criteria = '(UNSEEN)'
+                ok, data = self.mail.uid('SEARCH', None, search_criteria)
                 if self._cancel.is_set():
                     self.mail.close()
-                    return
-                header = self.parse_header(header[1])
-                from_ = self._decode_header(header['From'])
-                subject = self._decode_header(header['Subject'])
+                    break
+                uids = data[0].decode().split()
+                if uids and int(uids[-1]) < uidnext: # because IMAP
+                    uids = []
                 if verbose:
-                    print('From: {}\nSubject: {}\n'.format(from_, subject))
-                self.notify(from_, subject)
-            self.mail.close()
-        # schedule a new check
-        try:
-            period = self.profile.getboolean('period')
-        except ValueError:
-            period = True
-        if period:
-            self._thread = threading.Timer(self.profile.getint('period'), 
-                                           self._do_check)
-            self._thread.daemon = True
-            self._thread.start()
-        else:
-            self._cancel.set()
+                    print(decode_imap_utf7(mailbox.strip(b'"')), uidnext, 
+                          [int(i) for i in uids])
+                if not uids:
+                    self.mail.close()
+                    continue
+                
+                # parse headers for 'From' and 'Subject' and 
+                # notify Growl about the new messages
+                ok, data = self.mail.uid('FETCH', '{}:*'.format(uids[0]), 
+                                         '(BODY.PEEK[HEADER])')
+                if verbose: print('')
+                for header in data[::2]:
+                    if self._cancel.is_set():
+                        self.mail.close()
+                        break
+                    header = self.parse_header(header[1])
+                    from_ = self._decode_header(header['From'])
+                    subject = self._decode_header(header['Subject'])
+                    if verbose:
+                        print('From: {}\nSubject: {}\n'.format(from_, subject))
+                    self.notify(from_, subject)
+                else:
+                    self.mail.close()
+                    continue
+                break
+            
+            # log out
+            try:
+                bye, message = self.mail.logout()
+                if verbose:
+                    print('\n' + message[0].decode())
+            except:
+                pass
+            if self._cancel.is_set():
+                return
+            
+            # schedule a new check
+            try:
+                period = self.profile.getboolean('period')
+            except ValueError:
+                period = True
+            if period:
+                self._check_thread = threading.Timer(self.profile.getint('period'), 
+                                               self._do_check)
+                self._check_thread.daemon = True
+                self._check_thread.start()
+            else:
+                self._queue.put(self.exit)
+        
+        except Exception as err:
+            match = re.match(r"<class '(.+)'>", repr(type(err)))
+            name = match.group(1) if match else type(err).__name__
+            err_str = '{}: {}'.format(name, str(err))
+            # retry once if the conection was aborted, else exit with error
+            if isinstance(err, (OSError, imaplib.IMAP4.abort)) and retry:
+                if verbose:
+                    print(err_str)
+                time.sleep(10)
+                return self._do_check(retry=False)
+            try:
+                self.mail.logout()
+            except:
+                pass
+            self._queue.put(self.error)
+            self._queue.put(err_str)
     
     def _parse_list_response(self, line):
         flags, delimiter, mailbox_name = \
@@ -315,18 +328,70 @@ class EmailChecker(object):
                 header += header_part
         return header
     
-    def wait(self):
-        while not self._cancel.is_set():
-            if self._cancel.wait(2) and self._err:
-                raise SystemExit(self._err)
+    def _power_thread_f(self):
+        """Pause checking for new e-mails when the system enters suspended state
+        
+        Win32_PowerManagementEvent
+        http://msdn.microsoft.com/en-us/library/aa394362.aspx
+        """
+        pythoncom.CoInitialize()
+        try:
+            c = wmi.WMI()
+            watcher = c.Win32_PowerManagementEvent.watch_for()
+            while not self._cancel_all.is_set():
+                try:
+                    event_type = watcher(timeout_ms=2000).EventType
+                except wmi.x_wmi_timed_out:
+                    continue
+                if event_type == 4:
+                    self._queue.put(self.pause_internal)
+                elif event_type == 7:
+                    time.sleep(10)
+                    self._queue.put(self.resume_internal)
+        finally:
+            pythoncom.CoUninitialize()
     
-    def cancel(self):
+    def wait(self):
+        verbose = self.config['general'].getboolean('verbose')
+        self._queue = queue.Queue()
+        while True:
+            try:
+                item = self._queue.get(timeout=2)
+            except queue.Empty:
+                continue
+            if item in (self.pause, self.pause_internal):
+                if verbose:
+                    print('\npausing...')
+                self.cancel(cancel_all=item == self.pause)
+            elif item in (self.resume, self.resume_internal):
+                try:
+                    period = self.profile.getboolean('period')
+                except ValueError:
+                    period = True
+                if not period:
+                    continue
+                if verbose:
+                    print('\nresuming...')
+                self.check(power=item == self.resume)
+            elif item == self.exit:
+                if verbose:
+                    print('\nexiting...')
+                self.cancel()
+                break
+            elif item == self.error:
+                self.cancel()
+                raise SystemExit(self._queue.get())
+    
+    def cancel(self, cancel_all=True):
         self._cancel.set()
-        if hasattr(self._thread, 'cancel'):
-            self._thread.cancel()
-        self._thread.join(10)
-        try: self.logout()
-        except: pass
+        if hasattr(self._check_thread, 'cancel'):
+            self._check_thread.cancel()
+        if cancel_all:
+            self._cancel_all.set()
+            if self._power_thread:
+                self._power_thread.join(5)
+                self._power_thread = None
+        self._check_thread.join(10)
 
 
 def decode_imap_utf7(text):
@@ -360,11 +425,9 @@ if __name__ == '__main__':
     email_checker = EmailChecker()
     email_checker.parse_command_line()
     email_checker.register_gntp()
-    email_checker.login()
     email_checker.check()
     try:
         email_checker.wait()
     except (KeyboardInterrupt, SystemExit) as err:
         email_checker.cancel()
         raise SystemExit(err)
-

@@ -36,4 +36,9 @@ settings can be specified from command line.
 
 ###Changelog:
 
-    0.1 [2013-11-10]: initial release
+    0.1 [2013-11-10]:
+      initial release
+    0.2 [2014-09-19]:
+      improve exception handling / reconnection
+      fix not exiting after a single check
+      decode correctly mailbox names
